@@ -1,0 +1,91 @@
+INSTRUCTIONS TO ADD "PLAN ROUTE" BUTTON:
+
+Find the line around 565 that says:
+    col1, col2, col3, col4 = st.columns(4)
+
+REPLACE the entire button section (from col1, col2, col3, col4 = st.columns(4) to the end of col4) with:
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    with col1:
+        if st.button("▶️ Start", use_container_width=True, disabled=(amb["status"] == "Arrived" and amb["phase"] == "ToHospital")):
+            amb["auto_drive"] = True
+            st.rerun()
+    
+    with col2:
+        plan_disabled = not (amb.get("phase") == "ToPickup" and amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1 and amb["node"] == amb.get("pickup_node"))
+        if st.button("🗺️ Plan Route", use_container_width=True, disabled=plan_disabled):
+            G = data["G"]
+            hospital_nodes = data["hospital_nodes"]
+            pickup_node = amb["pickup_node"]
+            
+            distances = {}
+            for h in hospital_nodes:
+                try:
+                    distances[h] = nx.shortest_path_length(G, pickup_node, h, weight="dynamic_weight")
+                except nx.NetworkXNoPath:
+                    continue
+            
+            if distances:
+                nearest_hospital = min(distances, key=distances.get)
+                try:
+                    route_to_hospital = nx.shortest_path(G, pickup_node, nearest_hospital, weight="dynamic_weight")
+                    
+                    alternate_routes = []
+                    for i in range(1, min(len(route_to_hospital) - 1, 6)):
+                        if G.has_edge(route_to_hospital[i], route_to_hospital[i+1]):
+                            edge_data = G.get_edge_data(route_to_hospital[i], route_to_hospital[i+1])
+                            G.remove_edge(route_to_hospital[i], route_to_hospital[i+1])
+                            try:
+                                alt_route = nx.shortest_path(G, pickup_node, nearest_hospital, weight="dynamic_weight")
+                                if alt_route not in alternate_routes and len(alt_route) != len(route_to_hospital):
+                                    alternate_routes.append(alt_route)
+                            except nx.NetworkXNoPath:
+                                pass
+                            G.add_edge(route_to_hospital[i], route_to_hospital[i+1], **edge_data)
+                            if len(alternate_routes) >= 3:
+                                break
+                    
+                    data["optimal_route"] = route_to_hospital
+                    data["start"] = pickup_node
+                    data["destination"] = nearest_hospital
+                    data["distances"] = distances
+                    data["alternate_routes"] = alternate_routes
+                    data["center"] = [(G.nodes[pickup_node]['y'] + G.nodes[nearest_hospital]['y'])/2,
+                                      (G.nodes[pickup_node]['x'] + G.nodes[nearest_hospital]['x'])/2]
+                    amb["step"] = 0
+                    amb["phase"] = "ToHospital"
+                    amb["destination_hospital"] = nearest_hospital
+                    amb["event_log"].append({"event": "Patient Picked Up", "node": pickup_node})
+                    sync_ambulance_state(amb)
+                    st.success("✅ Route to hospital planned!")
+                    st.rerun()
+                except nx.NetworkXNoPath:
+                    st.error("No route to hospital available")
+    
+    with col3:
+        if st.button("⬅️ Previous", disabled=amb["step"] == 0, use_container_width=True):
+            amb["auto_drive"] = False
+            amb["step"] -= 1
+            sync_ambulance_state(amb)
+            st.rerun()
+    
+    with col4:
+        if st.button("➡️ Next", disabled=amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1, use_container_width=True):
+            amb["auto_drive"] = False
+            amb["step"] += 1
+            sync_ambulance_state(amb)
+            st.rerun()
+    
+    with col5:
+        end_disabled = amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1
+        if st.button("⏭️ End", disabled=end_disabled, use_container_width=True):
+            amb["step"] = len(amb["routes_data"]["optimal_route"]) - 1
+            sync_ambulance_state(amb)
+            st.rerun()
+
+KEY CHANGES:
+1. Changed from 4 columns to 5 columns
+2. Start button now ONLY enables auto_drive (no phase transition logic)
+3. New "Plan Route" button handles phase transition from pickup to hospital
+4. Plan Route button is only enabled when at pickup location
+5. Plan Route generates hospital route with alternate routes WITHOUT auto-starting
