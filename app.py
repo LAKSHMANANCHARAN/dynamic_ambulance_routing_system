@@ -1,5 +1,5 @@
 ﻿import streamlit as st # type: ignore
-from streamlit_folium import folium_static # type: ignore
+from streamlit_folium import st_folium # type: ignore
 import folium # type: ignore
 import osmnx as ox # type: ignore
 import networkx as nx  # type: ignore
@@ -484,7 +484,7 @@ if mode == "👨‍💼 Admin Dashboard":
                     icon=folium.DivIcon(html='<div style="font-size: 30px;">🚑</div>')
                 ).add_to(m)
         
-        folium_static(m, height=600, width=None)
+        st_folium(m, height=600, use_container_width=True)
 
 # ============================================================
 # AMBULANCE PANEL MODE
@@ -837,7 +837,7 @@ else:
         icon=folium.DivIcon(html=ambulance_html, icon_size=(56, 56), icon_anchor=(28, 28))
     ).add_to(m)
     
-    folium_static(m, height=700, width=None)
+    st_folium(m, height=700, use_container_width=True)
     
     # ---------------- MAP LEGEND ----------------
     st.subheader("🗺️ Map Legend")
