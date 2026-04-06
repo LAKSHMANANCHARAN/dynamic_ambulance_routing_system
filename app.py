@@ -7,7 +7,10 @@ import random
 import time
 import pandas as pd
 import numpy as np
-from tensorflow import keras # type: ignore
+try:
+    from tensorflow import keras # type: ignore
+except ImportError:
+    keras = None
 import os
 
 # ---------------- PAGE CONFIG ----------------
@@ -31,6 +34,8 @@ st.markdown('<div class="main-header"><h1>🚑 Smart Ambulance Routing Dashboard
 # ---------------- LSTM MODEL LOADING ----------------
 @st.cache_resource
 def load_lstm_model():
+    if keras is None:
+        return None
     model_path = "lstm_junction1_model.h5"
     try:
         if os.path.exists(model_path):
