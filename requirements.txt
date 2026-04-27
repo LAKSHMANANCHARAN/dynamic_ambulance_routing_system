@@ -4,5 +4,5 @@ folium
 osmnx
 networkx
 pandas
-numpy
-tensorflow
+numpy<2.0
+tensorflow==2.15.1
