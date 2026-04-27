@@ -1,5 +1,5 @@
-﻿import streamlit as st # type: ignore
-from streamlit_folium import st_folium # type: ignore
+import streamlit as st # type: ignore
+from streamlit_folium import folium_static # type: ignore
 import folium # type: ignore
 import osmnx as ox # type: ignore
 import networkx as nx  # type: ignore
@@ -7,10 +7,7 @@ import random
 import time
 import pandas as pd
 import numpy as np
-try:
-    from tensorflow import keras # type: ignore
-except ImportError:
-    keras = None
+from tensorflow import keras # type: ignore
 import os
 
 # ---------------- PAGE CONFIG ----------------
@@ -18,24 +15,106 @@ st.set_page_config(layout="wide", page_title="🚑 Ambulance Routing Dashboard",
 
 st.markdown("""
 <style>
-    .main-header { 
-        background: linear-gradient(90deg, #ff4757, #ff3838); 
-        padding: 1rem; 
-        border-radius: 10px; 
-        color: white; 
-        text-align: center; 
-        margin-bottom: 1rem;
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+
+    .main-header {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        border: 1px solid rgba(255,71,87,0.35);
+        padding: 1.6rem 2rem;
+        border-radius: 16px;
+        color: white;
+        text-align: center;
+        margin-bottom: 1.5rem;
+        box-shadow: 0 8px 32px rgba(255,71,87,0.18);
     }
+    .main-header h1 { font-size: 2rem; font-weight: 700; margin: 0; letter-spacing: -0.5px; }
+    .main-header p  { margin: 0.3rem 0 0; opacity: 0.7; font-size: 0.95rem; }
+
+    .section-title {
+        font-size: 0.78rem;
+        font-weight: 700;
+        color: #ff6b81;
+        text-transform: uppercase;
+        letter-spacing: 1.2px;
+        margin: 1.4rem 0 0.6rem;
+        padding-bottom: 5px;
+        border-bottom: 1px solid rgba(255,107,129,0.2);
+    }
+
+    .fleet-card {
+        background: linear-gradient(135deg, #1e1e2e, #252535);
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 12px;
+        padding: 0.9rem 1rem;
+        margin-bottom: 0.5rem;
+    }
+    .fleet-card:hover { border-color: rgba(255,71,87,0.4); }
+    .fleet-card .fc-id   { font-size: 1.05rem; font-weight: 700; color: #fff; }
+    .fleet-card .fc-enroute  { color: #ffa502; font-weight: 600; font-size: 0.85rem; }
+    .fleet-card .fc-arrived  { color: #2ed573; font-weight: 600; font-size: 0.85rem; }
+    .fleet-card .fc-idle     { color: #747d8c; font-weight: 600; font-size: 0.85rem; }
+    .fleet-card .fc-pill {
+        background: rgba(255,71,87,0.12);
+        border: 1px solid rgba(255,71,87,0.25);
+        border-radius: 20px;
+        padding: 2px 9px;
+        font-size: 0.75rem;
+        color: #ff6b81;
+        font-weight: 600;
+    }
+    .fc-bar-bg  { width:100%; background:rgba(255,255,255,0.07); border-radius:4px; height:4px; margin-top:6px; }
+    .fc-bar-fg  { height:4px; border-radius:4px; background:linear-gradient(90deg,#ff4757,#ff6b81); }
+
+    .metric-card {
+        background: linear-gradient(135deg, #1e1e2e, #252535);
+        border: 1px solid rgba(255,255,255,0.07);
+        border-radius: 12px;
+        padding: 1rem;
+        text-align: center;
+        height: 100%;
+    }
+    .metric-card .mc-label { font-size: 0.7rem; color: #a4b0be; text-transform: uppercase; letter-spacing: 0.6px; }
+    .metric-card .mc-value { font-size: 1.55rem; font-weight: 700; color: #fff; margin-top: 4px; }
+    .metric-card .mc-sub   { font-size: 0.75rem; color: #636e72; margin-top: 3px; }
+
+    .event-card {
+        background: rgba(255,71,87,0.06);
+        border-left: 3px solid #ff4757;
+        border-radius: 0 8px 8px 0;
+        padding: 0.65rem 1rem;
+        margin-bottom: 0.45rem;
+        font-size: 0.85rem;
+        color: #dfe6e9;
+    }
+    .event-card.pickup { border-left-color: #2ed573; background: rgba(46,213,115,0.06); }
+
+    .legend-row { display:flex; flex-wrap:wrap; gap:14px 24px; margin-top:4px; }
+    .legend-item { display:flex; align-items:center; gap:7px; font-size:0.83rem; color:#b2bec3; }
+    .legend-dot  { width:11px; height:11px; border-radius:50%; flex-shrink:0; }
+    .legend-line { width:22px; height:3px; border-radius:2px; flex-shrink:0; }
+
+    div[data-testid="stSidebar"] {
+        background: linear-gradient(180deg,#1a1a2e 0%,#16213e 100%);
+        border-right: 1px solid rgba(255,71,87,0.18);
+    }
+    .stProgress > div > div { background: linear-gradient(90deg,#ff4757,#ff6b81) !important; border-radius:4px; }
+    .map-wrap { border:1px solid rgba(255,71,87,0.22); border-radius:12px; overflow:hidden;
+                box-shadow:0 4px 24px rgba(0,0,0,0.35); margin-top:0.4rem; }
 </style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="main-header"><h1>🚑 Smart Ambulance Routing Dashboard</h1><p>Real-Time Emergency Navigation — Anna Nagar, Chennai</p></div>', unsafe_allow_html=True)
+st.markdown("""
+<div class="main-header">
+  <h1>🚑 Smart Ambulance Routing Dashboard</h1>
+  <p>Real-Time Emergency Navigation &mdash; Anna Nagar, Chennai</p>
+</div>
+""", unsafe_allow_html=True)
 
 # ---------------- LSTM MODEL LOADING ----------------
+# ML: Load pre-trained LSTM model (lstm_junction1_model.h5) built with TensorFlow/Keras
 @st.cache_resource
 def load_lstm_model():
-    if keras is None:
-        return None
     model_path = "lstm_junction1_model.h5"
     try:
         if os.path.exists(model_path):
@@ -48,6 +127,7 @@ def load_lstm_model():
         st.warning(f"Failed to load LSTM model: {e}")
         return None
 
+# ML: Converts LSTM output (0.0 to 1.0) into a congestion multiplier — low / medium / high
 def get_congestion_factor(prediction):
     if prediction < 0.4:
         return 1.0
@@ -113,20 +193,22 @@ def calculate_routes(seed, _lstm_model=None):
     
     num_edges = G.number_of_edges()
     
+    # ML: Run LSTM inference — input shape (num_edges, 24, 1) simulates 24 time-step traffic sequences
     if _lstm_model is not None:
         try:
             batch_data = np.random.rand(num_edges, 24, 1).astype('float32') * 0.8
-            predictions = _lstm_model.predict(batch_data, verbose=0, batch_size=128).flatten()
+            predictions = _lstm_model.predict(batch_data, verbose=0, batch_size=128).flatten()  # ML: forward pass
         except Exception as e:
-            predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)
+            predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)  # ML: fallback if model fails
     else:
-        predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)
+        predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)  # ML: fallback when no model loaded
     
+    # ML: Apply LSTM predictions to graph edges — each edge gets a congestion-adjusted weight
     for idx, (u, v, data) in enumerate(G.edges(data=True)):
         if 'length' in data:
             prediction = float(predictions[idx])
-            congestion_factor = get_congestion_factor(prediction)
-            data['dynamic_weight'] = data['length'] * congestion_factor
+            congestion_factor = get_congestion_factor(prediction)  # ML: map prediction -> multiplier
+            data['dynamic_weight'] = data['length'] * congestion_factor  # ML: congestion-aware edge cost
             data['congestion_factor'] = congestion_factor
         else:
             data['dynamic_weight'] = 100
@@ -169,21 +251,21 @@ def compute_route_for_ambulance(scenario_data, ambulance_node):
     G = scenario_data["G"]
     hospital_nodes = scenario_data["hospital_nodes"]
     
-    # Calculate distances to all hospitals using dynamic weights (LSTM-based)
+    # DP: Dijkstra's algorithm — finds shortest path to each hospital using ML-weighted edges
     distances = {}
     for h in hospital_nodes:
         try:
-            distances[h] = nx.shortest_path_length(G, ambulance_node, h, weight="dynamic_weight")
+            distances[h] = nx.shortest_path_length(G, ambulance_node, h, weight="dynamic_weight")  # DP: Dijkstra
         except nx.NetworkXNoPath:
             continue
     
     if not distances:
         return None
     
-    destination = min(distances, key=distances.get)
+    destination = min(distances, key=distances.get)  # DP: greedy selection of nearest hospital
     
     try:
-        optimal_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
+        optimal_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")  # DP: Dijkstra
     except nx.NetworkXNoPath:
         return None
 
@@ -191,20 +273,21 @@ def compute_route_for_ambulance(scenario_data, ambulance_node):
     lons = [G.nodes[n]['x'] for n in optimal_route]
     center = [(min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2]
 
+    # DP: Alternate route generation — temporarily remove edges and re-run Dijkstra to find detours
     alternate_routes = []
     for i in range(1, min(len(optimal_route) - 1, 6)):
         if G.has_edge(optimal_route[i], optimal_route[i+1]):
             edge_data = G.get_edge_data(optimal_route[i], optimal_route[i+1])
-            G.remove_edge(optimal_route[i], optimal_route[i+1])
+            G.remove_edge(optimal_route[i], optimal_route[i+1])  # DP: force alternate path
 
             try:
-                alt_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
+                alt_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")  # DP: Dijkstra
                 if alt_route not in alternate_routes and len(alt_route) != len(optimal_route):
                     alternate_routes.append(alt_route)
             except nx.NetworkXNoPath:
                 pass
 
-            G.add_edge(optimal_route[i], optimal_route[i+1], **edge_data)
+            G.add_edge(optimal_route[i], optimal_route[i+1], **edge_data)  # DP: restore edge
 
             if len(alternate_routes) >= 3:
                 break
@@ -254,8 +337,9 @@ def assign_emergency_to_ambulance(ambulance_id, scenario_data, pickup_node):
     ambulance_node = amb["node"]
     G = scenario_data["G"]
     
+    # DP: Dijkstra — find shortest ML-weighted path from ambulance to emergency pickup location
     try:
-        route_to_pickup = nx.shortest_path(G, ambulance_node, pickup_node, weight="dynamic_weight")
+        route_to_pickup = nx.shortest_path(G, ambulance_node, pickup_node, weight="dynamic_weight")  # DP: Dijkstra
     except nx.NetworkXNoPath:
         return False
 
@@ -341,6 +425,7 @@ with st.sidebar:
                     for aid in idle_ambulances:
                         amb_node = st.session_state.fleet[aid]["node"]
                         try:
+                            # DP+ML: Dijkstra with LSTM-weighted edges to find nearest idle ambulance
                             dist = nx.shortest_path_length(G, amb_node, emergency_node, weight="dynamic_weight")
                             if dist < min_dist:
                                 min_dist = dist
@@ -365,28 +450,7 @@ for amb_id, amb in st.session_state.fleet.items():
     if amb["status"] == "Arrived":
         amb["auto_drive"] = False
 
-MOVE_INTERVAL_SEC = 0.6
-now_ts = time.time()
-tick_ready = (now_ts - st.session_state.last_move_ts) >= MOVE_INTERVAL_SEC
-
-if tick_ready:
-    for amb in st.session_state.fleet.values():
-        if amb["routes_data"] and amb["auto_drive"]:
-            route = amb["routes_data"]["optimal_route"]
-            last_idx = len(route) - 1
-
-            # Safety lock: never keep auto_drive active once arrived/final reached.
-            if amb["status"] == "Arrived" or amb["step"] >= last_idx:
-                amb["auto_drive"] = False
-                sync_ambulance_state(amb)
-                continue
-
-            # Step progression is handled here; node/status are handled only in sync_ambulance_state.
-            amb["step"] += 1
-            if amb["step"] >= last_idx:
-                amb["auto_drive"] = False
-            sync_ambulance_state(amb)
-    st.session_state.last_move_ts = now_ts
+MOVE_INTERVAL_SEC = 1.2
 
 any_auto_drive = any(
     amb["auto_drive"] and amb["routes_data"] and amb["status"] != "Arrived"
@@ -484,7 +548,7 @@ if mode == "👨‍💼 Admin Dashboard":
                     icon=folium.DivIcon(html='<div style="font-size: 30px;">🚑</div>')
                 ).add_to(m)
         
-        st_folium(m, height=600, use_container_width=True)
+        folium_static(m, height=600, width=None)
 
 # ============================================================
 # AMBULANCE PANEL MODE
@@ -516,6 +580,7 @@ else:
         remaining = len(amb["routes_data"]["optimal_route"]) - amb["step"] - 1
         st.metric("⏱️ Steps Left", remaining if remaining > 0 else "0")
     with col4:
+        # ML: Average congestion factor across all route edges — derived from LSTM predictions
         if len(amb["routes_data"]["optimal_route"]) > 1:
             avg_congestion = np.mean([
                 G[amb["routes_data"]["optimal_route"][i]][amb["routes_data"]["optimal_route"][i+1]][0].get('congestion_factor', 1.0)
@@ -598,10 +663,12 @@ else:
                 u, v = amb["routes_data"]["optimal_route"][i], amb["routes_data"]["optimal_route"][i+1]
                 if G.has_edge(u, v):
                     edge_data = G[u][v][0]
+                    # ML: Spike congestion factor to 3x to simulate accident — forces Dijkstra to reroute
                     edge_data['dynamic_weight'] = edge_data.get('length', 100) * 3.0
                     edge_data['congestion_factor'] = 3.0
             
             try:
+                # DP: Re-run Dijkstra after accident congestion spike to find new optimal route
                 new_route = nx.shortest_path(G, current_node, data["destination"], weight="dynamic_weight")
                 
                 if new_route[0] == current_node:
@@ -720,12 +787,28 @@ else:
     
     if "slider_override" not in amb:
         amb["slider_override"] = False
-    
+
+    _slider_override_active = amb["slider_override"]
     if amb["slider_override"]:
         amb["slider_override"] = False
-    
-    slider_step = st.slider("🚑 Ambulance Position", 0, max(len(amb["routes_data"]["optimal_route"])-1, 1), amb["step"], key=f"slider_{selected_ambulance}")
-    if not amb["auto_drive"] and not amb["slider_override"] and slider_step != amb["step"]:
+
+    _route_len = len(amb["routes_data"]["optimal_route"])
+    _slider_max = max(_route_len - 1, 1)
+    _safe_step = max(0, min(amb["step"], _slider_max))
+    # When arrived, pin the key to the final step so Streamlit never re-initialises
+    # the widget back to 0 on the next rerun.
+    _slider_key = (
+        f"slider_{selected_ambulance}_arrived_{_safe_step}"
+        if amb["status"] == "Arrived"
+        else f"slider_{selected_ambulance}_{_route_len}"
+    )
+    slider_step = st.slider("🚑 Ambulance Position", 0, _slider_max, _safe_step, key=_slider_key)
+    if (
+        not amb["auto_drive"]
+        and not _slider_override_active
+        and amb["status"] != "Arrived"
+        and slider_step != amb["step"]
+    ):
         amb["step"] = slider_step
         sync_ambulance_state(amb)
     
@@ -762,104 +845,123 @@ else:
                         ---
                         """)
     
-    # ---------------- MAP ----------------
-    current_node = amb["routes_data"]["optimal_route"][amb["step"]]
-    lat, lon = G.nodes[current_node]['y'], G.nodes[current_node]['x']
-    
+    # ---------------- MAP (rendered once, animated via JS) ----------------
+    route_coords = [
+        [G.nodes[n]['y'], G.nodes[n]['x']]
+        for n in amb["routes_data"]["optimal_route"]
+    ]
+    current_pos = route_coords[amb["step"]]
+
     m = folium.Map(location=data["center"], zoom_start=15, control_scale=True)
-    
+
+    # Static layers — drawn once, never change during animation
     route_colors = ["blue", "green", "orange", "purple"]
-    for idx, route in enumerate(data["alternate_routes"]):
+    for idx, alt_route in enumerate(data["alternate_routes"]):
         if idx < len(route_colors):
-            pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
-            folium.PolyLine(pts, color=route_colors[idx], weight=4, opacity=0.7, tooltip=f"Alternate Route {idx+1}").add_to(m)
-    
+            pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in alt_route]
+            folium.PolyLine(pts, color=route_colors[idx], weight=4, opacity=0.6,
+                            tooltip=f"Alternate Route {idx+1}").add_to(m)
+
     if "old_route" in data:
         old_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in data["old_route"]]
         folium.PolyLine(old_pts, color="gray", weight=4, opacity=0.5, tooltip="Previous Route").add_to(m)
-    
-    optimal_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in amb["routes_data"]["optimal_route"]]
-    folium.PolyLine(optimal_pts, color="red", weight=5, opacity=0.85, tooltip="🚑 Optimal Route").add_to(m)
-    
+
+    folium.PolyLine(route_coords, color="red", weight=5, opacity=0.85, tooltip="🚑 Optimal Route").add_to(m)
+
     start_node = data["start"]
     folium.Marker(
         location=(G.nodes[start_node]['y'], G.nodes[start_node]['x']),
-        popup="🏁 Start",
-        icon=folium.Icon(color="green", icon="play")
+        popup="🏁 Start", icon=folium.Icon(color="green", icon="play")
     ).add_to(m)
-    
-    # Show emergency/pickup marker if in ToPickup phase
+
     if amb["phase"] == "ToPickup" and amb["pickup_node"]:
-        p_lat, p_lon = G.nodes[amb["pickup_node"]]['y'], G.nodes[amb["pickup_node"]]['x']
+        p_lat = G.nodes[amb["pickup_node"]]['y']
+        p_lon = G.nodes[amb["pickup_node"]]['x']
         folium.Marker(
-            location=(p_lat, p_lon),
-            popup="🚨 Emergency Pickup Location",
-            icon=folium.DivIcon(html='<div style="font-size: 36px; animation: blink 1s infinite;">🚨</div><style>@keyframes blink {0%, 100% {opacity: 1;} 50% {opacity: 0.3;}}</style>')
+            location=(p_lat, p_lon), popup="🚨 Emergency Pickup",
+            icon=folium.DivIcon(
+                html='<div style="font-size:32px;animation:blink 1s infinite">🚨</div>'
+                     '<style>@keyframes blink{0%,100%{opacity:1}50%{opacity:0.2}}</style>')
         ).add_to(m)
-    
-    # Show hospitals
-    for idx, h in enumerate(data["hospital_nodes"]):
-        is_destination = h == data.get("destination")
-        hosp_lat, hosp_lon = G.nodes[h]['y'], G.nodes[h]['x']
-        
-        if is_destination and amb["phase"] == "ToHospital":
-            folium.CircleMarker(
-                location=(hosp_lat, hosp_lon),
-                radius=12,
-                color="red",
-                fill=True,
-                fillColor="#ff7f7f",
-                fillOpacity=0.55,
-                popup="🏥 Destination Hospital",
-                weight=2
-            ).add_to(m)
-        else:
-            folium.CircleMarker(
-                location=(hosp_lat, hosp_lon),
-                radius=8,
-                color="blue",
-                fill=True,
-                fillColor="lightblue",
-                fillOpacity=0.7,
-                popup="🏥 Hospital Entrance",
-                weight=2
-            ).add_to(m)
-    
-    ambulance_html = f"""
-    <div style="font-size: 42px; text-shadow: 2px 2px 4px rgba(0,0,0,0.6); animation: pulse 2s infinite;">🚑</div>
-    <style>
-    @keyframes pulse {{ 0% {{ transform: scale(1); }} 50% {{ transform: scale(1.1); }} 100% {{ transform: scale(1); }} }}
-    </style>
-    """
+
+    for h in data["hospital_nodes"]:
+        is_dest = h == data.get("destination")
+        hl, hlo = G.nodes[h]['y'], G.nodes[h]['x']
+        folium.CircleMarker(
+            location=(hl, hlo),
+            radius=12 if is_dest and amb["phase"] == "ToHospital" else 8,
+            color="red" if is_dest and amb["phase"] == "ToHospital" else "blue",
+            fill=True,
+            fillColor="#ff7f7f" if is_dest and amb["phase"] == "ToHospital" else "lightblue",
+            fillOpacity=0.6, weight=2,
+            popup="🏥 Destination" if is_dest else "🏥 Hospital"
+        ).add_to(m)
+
+    # Ambulance marker at current step position
     folium.Marker(
-        location=(lat, lon),
-        popup=f"🚑 {selected_ambulance} - Step {amb['step']+1}/{len(amb['routes_data']['optimal_route'])}",
-        icon=folium.DivIcon(html=ambulance_html, icon_size=(56, 56), icon_anchor=(28, 28))
+        location=current_pos,
+        popup=f"🚑 {selected_ambulance}",
+        icon=folium.DivIcon(
+            html='<div id="amb-marker" style="font-size:38px;transition:none">🚑</div>',
+            icon_size=(48, 48), icon_anchor=(24, 24)
+        )
     ).add_to(m)
-    
-    st_folium(m, height=700, use_container_width=True)
-    
-    # ---------------- MAP LEGEND ----------------
-    st.subheader("🗺️ Map Legend")
-    l1, l2, l3 = st.columns(3)
-    with l1:
-        st.markdown("`🚑` Ambulance")
-        st.markdown("`🔴` Optimal Route")
-        if "old_route" in data:
-            st.markdown("`⚫` Previous Route")
-    with l2:
-        st.markdown("`🔵` Alternate Route 1")
-        st.markdown("`🟢` Alternate Route 2")
-        st.markdown("`🟠` Alternate Route 3")
-    with l3:
-        st.markdown("`🏁` Route Start")
-        st.markdown("`🏥` Destination Hospital")
-        st.markdown("`🔹` Other Hospitals")
-    
+
+    # Inject JS: smoothly animate the marker through remaining waypoints client-side
+    # This runs entirely in the browser — zero Streamlit reruns during movement
+    if amb["auto_drive"] and amb["status"] != "Arrived":
+        remaining_coords = route_coords[amb["step"]:]
+        interval_ms = int(MOVE_INTERVAL_SEC * 1000)
+        js_waypoints = str(remaining_coords).replace("[", "[").replace("]", "]")
+        smooth_js = f"""
+        <script>
+        (function() {{
+            var waypoints = {js_waypoints};
+            var idx = 0;
+            var interval = {interval_ms};
+
+            function moveMarker() {{
+                // Find the leaflet map and the ambulance DivIcon marker
+                var maps = Object.values(window).filter(function(v) {{
+                    return v && v._leaflet_id && v.eachLayer;
+                }});
+                if (!maps.length) return;
+                var map = maps[maps.length - 1];
+
+                map.eachLayer(function(layer) {{
+                    if (layer._icon && layer._icon.querySelector && layer._icon.querySelector('#amb-marker')) {{
+                        if (idx < waypoints.length) {{
+                            var latlng = L.latLng(waypoints[idx][0], waypoints[idx][1]);
+                            layer.setLatLng(latlng);
+                            idx++;
+                        }} else {{
+                            clearInterval(timer);
+                        }}
+                    }}
+                }});
+            }}
+
+            // Wait for map to be ready
+            var ready = setInterval(function() {{
+                var maps = Object.values(window).filter(function(v) {{
+                    return v && v._leaflet_id && v.eachLayer;
+                }});
+                if (maps.length) {{
+                    clearInterval(ready);
+                    var timer = setInterval(moveMarker, interval);
+                    moveMarker();
+                }}
+            }}, 200);
+        }})();
+        </script>
+        """
+        m.get_root().html.add_child(folium.Element(smooth_js))
+
+    folium_static(m, height=700, width=None)
+
+    st.progress(progress, text=f"🚑 Mission Progress: {progress}%  |  Step {amb['step']+1}/{len(amb['routes_data']['optimal_route'])}")
+
     # ---------------- STATUS ----------------
-    st.subheader("📊 Mission Status")
-    st.progress(progress, text=f"🚑 Mission Progress: {progress}%")
-    
     if amb["step"] == 0:
         if amb["phase"] == "ToPickup":
             st.info("🚨 Ambulance dispatched to pickup location")
@@ -874,31 +976,22 @@ else:
             st.success("✅ Ambulance arrived at hospital!")
         else:
             st.success("✅ Ambulance arrived at destination!")
-    
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("📍 Current Step", f"{amb['step']+1}/{len(amb['routes_data']['optimal_route'])}")
-    with col2:
-        st.metric("📈 Progress", f"{progress}%")
-    with col3:
-        if "old_route" in data:
-            total_distance = sum(
-                G[amb["routes_data"]["optimal_route"][j]][amb["routes_data"]["optimal_route"][j+1]][0].get('length', 0)
-                for j in range(len(amb["routes_data"]["optimal_route"]) - 1)
-            )
-        else:
-            total_distance = nx.shortest_path_length(G, data["start"], data["destination"], weight="length")
-        st.metric("📏 Total Distance", f"{total_distance/1000:.1f} km")
-    with col4:
-        if amb["step"] == len(amb["routes_data"]["optimal_route"])-1:
-            st.success("🏁 ARRIVED")
-        else:
-            remaining = len(amb["routes_data"]["optimal_route"]) - amb["step"] - 1
-            st.info(f"⏱️ {remaining} steps left")
-    
+
 if any_auto_drive:
-    sleep_for = max(0.0, MOVE_INTERVAL_SEC - (time.time() - st.session_state.last_move_ts))
-    if sleep_for > 0:
-        time.sleep(sleep_for)
+    time.sleep(MOVE_INTERVAL_SEC)
+    # Advance all auto-driving ambulances by one step
+    for amb in st.session_state.fleet.values():
+        if not (amb["routes_data"] and amb["auto_drive"]):
+            continue
+        route = amb["routes_data"]["optimal_route"]
+        last_idx = len(route) - 1
+        if amb["status"] == "Arrived" or amb["step"] >= last_idx:
+            amb["auto_drive"] = False
+            sync_ambulance_state(amb)
+            continue
+        amb["step"] += 1
+        if amb["step"] >= last_idx:
+            amb["auto_drive"] = False
+        sync_ambulance_state(amb)
     st.rerun()
-    
+
