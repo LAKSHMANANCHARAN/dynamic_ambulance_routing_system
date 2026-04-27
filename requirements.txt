@@ -4,5 +4,5 @@ folium
 osmnx
 networkx
 pandas
-numpy<2.0
-tensorflow==2.15.1
+numpy
+scikit-learn

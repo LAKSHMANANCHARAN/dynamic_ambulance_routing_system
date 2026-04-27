@@ -1,4 +1,4 @@
-import streamlit as st # type: ignore
+﻿import streamlit as st # type: ignore
 from streamlit_folium import folium_static # type: ignore
 import folium # type: ignore
 import osmnx as ox # type: ignore
@@ -7,8 +7,8 @@ import random
 import time
 import pandas as pd
 import numpy as np
-from tensorflow import keras # type: ignore
 import os
+import pickle
 
 # ---------------- PAGE CONFIG ----------------
 st.set_page_config(layout="wide", page_title="🚑 Ambulance Routing Dashboard", page_icon="🚑")
@@ -111,24 +111,69 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# ---------------- LSTM MODEL LOADING ----------------
-# ML: Load pre-trained LSTM model (lstm_junction1_model.h5) built with TensorFlow/Keras
+# ---------------- CONGESTION MODEL (replaces TensorFlow/Keras LSTM) ----------------
+# Uses scikit-learn RandomForestRegressor — fully compatible with Python 3.14.
+# Mimics the same interface: predict() accepts (n_samples, 24) feature arrays
+# and returns congestion scores in [0.0, 1.0].
+
 @st.cache_resource
-def load_lstm_model():
-    model_path = "lstm_junction1_model.h5"
+def load_congestion_model():
+    """
+    Load a pre-trained sklearn model from disk (congestion_model.pkl) if available.
+    If not, build and return a lightweight in-memory model trained on synthetic data.
+    This replaces the TensorFlow LSTM while preserving the same congestion-factor logic.
+    """
+    model_path = "congestion_model.pkl"
     try:
         if os.path.exists(model_path):
-            model = keras.models.load_model(model_path, compile=False)
+            with open(model_path, "rb") as f:
+                model = pickle.load(f)
             return model
-        else:
-            st.warning(f"LSTM model not found. Using default congestion factors.")
-            return None
+    except Exception:
+        pass
+
+    # Build a lightweight fallback model on synthetic traffic data
+    try:
+        from sklearn.ensemble import RandomForestRegressor  # type: ignore
+
+        rng = np.random.default_rng(42)
+        # 24 time-step features per sample (hour-of-day traffic pattern)
+        X_train = rng.random((2000, 24)).astype("float32")
+        # Ground-truth: busy hours (8-10, 17-20) → higher congestion
+        hour_weights = np.array([
+            0.2, 0.2, 0.15, 0.15, 0.2, 0.3,   # 0-5
+            0.45, 0.65, 0.85, 0.8, 0.55, 0.5,  # 6-11
+            0.55, 0.5, 0.45, 0.5, 0.7, 0.9,    # 12-17
+            0.85, 0.75, 0.6, 0.45, 0.35, 0.25  # 18-23
+        ], dtype="float32")
+        y_train = np.clip(X_train.dot(hour_weights) / hour_weights.sum() + rng.normal(0, 0.05, 2000), 0, 1).astype("float32")
+
+        model = RandomForestRegressor(n_estimators=30, max_depth=6, random_state=42, n_jobs=-1)
+        model.fit(X_train, y_train)
+        return model
     except Exception as e:
-        st.warning(f"Failed to load LSTM model: {e}")
+        st.warning(f"Could not build congestion model: {e}. Using random fallback.")
         return None
 
-# ML: Converts LSTM output (0.0 to 1.0) into a congestion multiplier — low / medium / high
-def get_congestion_factor(prediction):
+
+def predict_congestion(model, num_edges: int) -> np.ndarray:
+    """
+    Run congestion inference for `num_edges` road segments.
+    Input shape: (num_edges, 24) — 24 time-step traffic features per edge.
+    Returns a 1-D array of floats in [0.0, 1.0].
+    """
+    if model is None:
+        return np.random.choice([0.3, 0.5, 0.8], size=num_edges).astype("float32")
+    try:
+        batch_data = np.random.rand(num_edges, 24).astype("float32") * 0.8
+        predictions = model.predict(batch_data).flatten()
+        return np.clip(predictions, 0.0, 1.0).astype("float32")
+    except Exception:
+        return np.random.choice([0.3, 0.5, 0.8], size=num_edges).astype("float32")
+
+
+# ML: Converts model output (0.0 to 1.0) into a congestion multiplier — low / medium / high
+def get_congestion_factor(prediction: float) -> float:
     if prediction < 0.4:
         return 1.0
     elif prediction < 0.7:
@@ -136,7 +181,8 @@ def get_congestion_factor(prediction):
     else:
         return 2.0
 
-lstm_model = load_lstm_model()
+
+congestion_model = load_congestion_model()
 
 # ---------------- GRAPH LOADING ----------------
 @st.cache_resource
@@ -185,25 +231,18 @@ def build_alternate_routes(graph, primary_route, start_node, destination, max_al
     return alternates
 
 # ---------------- ROUTE COMPUTATION ----------------
-def calculate_routes(seed, _lstm_model=None):
-    """Load graph, apply LSTM congestion, fetch hospitals."""
+def calculate_routes(seed, _congestion_model=None):
+    """Load graph, apply congestion model predictions, fetch hospitals."""
     G = load_graph()
     if G is None:
         return None
-    
+
     num_edges = G.number_of_edges()
-    
-    # ML: Run LSTM inference — input shape (num_edges, 24, 1) simulates 24 time-step traffic sequences
-    if _lstm_model is not None:
-        try:
-            batch_data = np.random.rand(num_edges, 24, 1).astype('float32') * 0.8
-            predictions = _lstm_model.predict(batch_data, verbose=0, batch_size=128).flatten()  # ML: forward pass
-        except Exception as e:
-            predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)  # ML: fallback if model fails
-    else:
-        predictions = np.random.choice([0.3, 0.5, 0.8], size=num_edges)  # ML: fallback when no model loaded
-    
-    # ML: Apply LSTM predictions to graph edges — each edge gets a congestion-adjusted weight
+
+    # ML: Run congestion inference — predictions array shape (num_edges,) in [0, 1]
+    predictions = predict_congestion(_congestion_model, num_edges)
+
+    # ML: Apply predictions to graph edges — each edge gets a congestion-adjusted weight
     for idx, (u, v, data) in enumerate(G.edges(data=True)):
         if 'length' in data:
             prediction = float(predictions[idx])
@@ -219,7 +258,7 @@ def calculate_routes(seed, _lstm_model=None):
     try:
         tags = {"amenity": "hospital"}
         hospital_gdf = ox.features_from_place("Anna Nagar, Chennai, India", tags)
-        
+
         for geom in hospital_gdf.geometry:
             try:
                 lon, lat = geom.centroid.x, geom.centroid.y
@@ -244,28 +283,28 @@ def calculate_routes(seed, _lstm_model=None):
     }
 
 def compute_route_for_ambulance(scenario_data, ambulance_node):
-    """Select nearest hospital and compute route from ambulance's current node - EXACTLY like reference code."""
+    """Select nearest hospital and compute route from ambulance's current node."""
     if scenario_data is None:
         return None
 
     G = scenario_data["G"]
     hospital_nodes = scenario_data["hospital_nodes"]
-    
+
     # DP: Dijkstra's algorithm — finds shortest path to each hospital using ML-weighted edges
     distances = {}
     for h in hospital_nodes:
         try:
-            distances[h] = nx.shortest_path_length(G, ambulance_node, h, weight="dynamic_weight")  # DP: Dijkstra
+            distances[h] = nx.shortest_path_length(G, ambulance_node, h, weight="dynamic_weight")
         except nx.NetworkXNoPath:
             continue
-    
+
     if not distances:
         return None
-    
+
     destination = min(distances, key=distances.get)  # DP: greedy selection of nearest hospital
-    
+
     try:
-        optimal_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")  # DP: Dijkstra
+        optimal_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
     except nx.NetworkXNoPath:
         return None
 
@@ -278,16 +317,16 @@ def compute_route_for_ambulance(scenario_data, ambulance_node):
     for i in range(1, min(len(optimal_route) - 1, 6)):
         if G.has_edge(optimal_route[i], optimal_route[i+1]):
             edge_data = G.get_edge_data(optimal_route[i], optimal_route[i+1])
-            G.remove_edge(optimal_route[i], optimal_route[i+1])  # DP: force alternate path
+            G.remove_edge(optimal_route[i], optimal_route[i+1])
 
             try:
-                alt_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")  # DP: Dijkstra
+                alt_route = nx.shortest_path(G, ambulance_node, destination, weight="dynamic_weight")
                 if alt_route not in alternate_routes and len(alt_route) != len(optimal_route):
                     alternate_routes.append(alt_route)
             except nx.NetworkXNoPath:
                 pass
 
-            G.add_edge(optimal_route[i], optimal_route[i+1], **edge_data)  # DP: restore edge
+            G.add_edge(optimal_route[i], optimal_route[i+1], **edge_data)
 
             if len(alternate_routes) >= 3:
                 break
@@ -336,10 +375,9 @@ def assign_emergency_to_ambulance(ambulance_id, scenario_data, pickup_node):
     amb = st.session_state.fleet[ambulance_id]
     ambulance_node = amb["node"]
     G = scenario_data["G"]
-    
-    # DP: Dijkstra — find shortest ML-weighted path from ambulance to emergency pickup location
+
     try:
-        route_to_pickup = nx.shortest_path(G, ambulance_node, pickup_node, weight="dynamic_weight")  # DP: Dijkstra
+        route_to_pickup = nx.shortest_path(G, ambulance_node, pickup_node, weight="dynamic_weight")
     except nx.NetworkXNoPath:
         return False
 
@@ -398,19 +436,19 @@ if "current_emergency" not in st.session_state:
 with st.sidebar:
     st.header("🎛️ Control Panel")
     mode = st.radio("Select View Mode", ["👨‍💼 Admin Dashboard", "🚑 Ambulance Panel"])
-    
+
     if mode == "🚑 Ambulance Panel":
         selected_ambulance = st.selectbox("Select Ambulance", list(st.session_state.fleet.keys()))
-    
+
     if st.button("🔄 Generate New Emergency Scenario", type="primary", use_container_width=True):
         scenario_seed = int(time.time())
-        scenario_data = calculate_routes(scenario_seed, lstm_model)
+        scenario_data = calculate_routes(scenario_seed, congestion_model)
         if scenario_data:
             G = scenario_data["G"]
             all_nodes = list(G.nodes)
             emergency_node = random.choice(all_nodes)
             st.session_state.current_emergency = emergency_node
-            
+
             if mode == "🚑 Ambulance Panel":
                 if assign_emergency_to_ambulance(selected_ambulance, scenario_data, emergency_node):
                     st.success(f"✅ {selected_ambulance} dispatched to pickup location")
@@ -421,18 +459,17 @@ with st.sidebar:
                 if idle_ambulances:
                     min_dist = float("inf")
                     nearest_amb = None
-                    
+
                     for aid in idle_ambulances:
                         amb_node = st.session_state.fleet[aid]["node"]
                         try:
-                            # DP+ML: Dijkstra with LSTM-weighted edges to find nearest idle ambulance
                             dist = nx.shortest_path_length(G, amb_node, emergency_node, weight="dynamic_weight")
                             if dist < min_dist:
                                 min_dist = dist
                                 nearest_amb = aid
-                        except:
+                        except Exception:
                             continue
-                    
+
                     if nearest_amb:
                         if assign_emergency_to_ambulance(nearest_amb, scenario_data, emergency_node):
                             st.success(f"✅ Nearest ambulance {nearest_amb} dispatched to pickup location")
@@ -462,8 +499,7 @@ any_auto_drive = any(
 # ============================================================
 if mode == "👨‍💼 Admin Dashboard":
     st.subheader("👨‍💼 Fleet Overview")
-    
-    # Fleet status table
+
     fleet_data = []
     for amb_id, amb in st.session_state.fleet.items():
         if amb["routes_data"] and amb["status"] == "En Route":
@@ -471,83 +507,76 @@ if mode == "👨‍💼 Admin Dashboard":
             progress = int((amb["step"] / max(route_len - 1, 1)) * 100)
         else:
             progress = 0
-        
+
         fleet_data.append({
             "🚑 ID": amb_id,
             "📊 Status": amb["status"],
             "📈 Progress": f"{progress}%",
             "🔄 Reroutes": amb["reroute_count"]
         })
-    
+
     st.dataframe(pd.DataFrame(fleet_data), use_container_width=True, hide_index=True)
-    
-    # Admin map showing all ambulances
+
     G = load_graph()
     if G:
-        # Calculate center from all active ambulances
         all_lats, all_lons = [], []
         for amb in st.session_state.fleet.values():
             if amb["routes_data"]:
                 route = amb["routes_data"]["optimal_route"]
                 all_lats.extend([G.nodes[n]['y'] for n in route])
                 all_lons.extend([G.nodes[n]['x'] for n in route])
-        
+
         if all_lats:
             center = [(min(all_lats) + max(all_lats)) / 2, (min(all_lons) + max(all_lons)) / 2]
         else:
-            center = [13.0850, 80.2101]  # Default Anna Nagar
-        
+            center = [13.0850, 80.2101]
+
         m = folium.Map(location=center, zoom_start=16, control_scale=True)
-        
-        # Emergency marker
+
         if st.session_state.current_emergency:
-            e_lat, e_lon = G.nodes[st.session_state.current_emergency]['y'], G.nodes[st.session_state.current_emergency]['x']
+            e_lat = G.nodes[st.session_state.current_emergency]['y']
+            e_lon = G.nodes[st.session_state.current_emergency]['x']
             folium.Marker(
                 location=(e_lat, e_lon),
                 popup="🚨 Emergency Location",
-                icon=folium.DivIcon(html='<div style="font-size: 36px; animation: blink 1s infinite;">🚨</div><style>@keyframes blink {0%, 100% {opacity: 1;} 50% {opacity: 0.3;}}</style>')
+                icon=folium.DivIcon(
+                    html='<div style="font-size: 36px; animation: blink 1s infinite;">🚨</div>'
+                         '<style>@keyframes blink {0%, 100% {opacity: 1;} 50% {opacity: 0.3;}}</style>'
+                )
             ).add_to(m)
-        
-        # Draw each ambulance
+
         for amb_id, amb in st.session_state.fleet.items():
             if amb["routes_data"] and amb["status"] in ["En Route", "Arrived"]:
                 data = amb["routes_data"]
                 route = data["optimal_route"]
-                
-                # Draw old route if rerouted
+
                 if "old_route" in data:
                     old_pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in data["old_route"]]
                     folium.PolyLine(old_pts, color="gray", weight=2, opacity=0.4).add_to(m)
-                
-                # Draw current route
+
                 route_color = "orange" if amb["phase"] == "ToPickup" else "red"
                 pts = [(G.nodes[n]['y'], G.nodes[n]['x']) for n in route]
                 phase_label = "→ Pickup" if amb["phase"] == "ToPickup" else "→ Hospital"
-                folium.PolyLine(pts, color=route_color, weight=4, opacity=0.7, tooltip=f"{amb_id} {phase_label}").add_to(m)
-                
-                # Ambulance marker
+                folium.PolyLine(pts, color=route_color, weight=4, opacity=0.7,
+                                tooltip=f"{amb_id} {phase_label}").add_to(m)
+
                 current_node = route[amb["step"]]
                 lat, lon = G.nodes[current_node]['y'], G.nodes[current_node]['x']
-                
-                if amb["step"] == len(route) - 1:
-                    icon_html = "🏁"
-                else:
-                    icon_html = "🚑"
-                
+                icon_html = "🏁" if amb["step"] == len(route) - 1 else "🚑"
+
                 folium.Marker(
                     location=(lat, lon),
                     popup=f"{amb_id} - Step {amb['step']+1}/{len(route)}",
                     icon=folium.DivIcon(html=f'<div style="font-size: 32px;">{icon_html}</div>')
                 ).add_to(m)
             elif amb["status"] == "Idle" and amb["node"]:
-                # Show idle ambulances
                 lat, lon = G.nodes[amb["node"]]['y'], G.nodes[amb["node"]]['x']
                 folium.Marker(
                     location=(lat, lon),
                     popup=f"{amb_id} - Idle",
                     icon=folium.DivIcon(html='<div style="font-size: 30px;">🚑</div>')
                 ).add_to(m)
-        
+
         folium_static(m, height=600, width=None)
 
 # ============================================================
@@ -555,22 +584,22 @@ if mode == "👨‍💼 Admin Dashboard":
 # ============================================================
 else:
     amb = st.session_state.fleet[selected_ambulance]
-    
+
     if amb["routes_data"] is None:
         st.info(f"🚑 {selected_ambulance} is currently Idle. Generate an emergency scenario to assign a route.")
         st.stop()
-    
+
     data = amb["routes_data"]
     G = data["G"]
     max_idx = max(len(amb["routes_data"]["optimal_route"]) - 1, 0)
-    
+
     amb["step"] = min(max(amb["step"], 0), max_idx)
     route_steps = max(len(amb["routes_data"]["optimal_route"]) - 1, 1)
     progress = int((amb["step"] / route_steps) * 100)
-    
+
     # ---------------- ANALYTICS PANEL ----------------
     st.subheader(f"📊 {selected_ambulance} - Emergency Response Analytics")
-    
+
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("📈 Progress", f"{progress}%")
@@ -580,35 +609,36 @@ else:
         remaining = len(amb["routes_data"]["optimal_route"]) - amb["step"] - 1
         st.metric("⏱️ Steps Left", remaining if remaining > 0 else "0")
     with col4:
-        # ML: Average congestion factor across all route edges — derived from LSTM predictions
+        # ML: Average congestion factor across all route edges — derived from model predictions
         if len(amb["routes_data"]["optimal_route"]) > 1:
+            route_opt = amb["routes_data"]["optimal_route"]
             avg_congestion = np.mean([
-                G[amb["routes_data"]["optimal_route"][i]][amb["routes_data"]["optimal_route"][i+1]][0].get('congestion_factor', 1.0)
-                for i in range(len(amb["routes_data"]["optimal_route"]) - 1)
+                G[route_opt[i]][route_opt[i+1]][0].get('congestion_factor', 1.0)
+                for i in range(len(route_opt) - 1)
             ])
         else:
             avg_congestion = 1.0
         congestion_status = "🟢 Low" if avg_congestion < 1.3 else "🟡 Medium" if avg_congestion < 1.8 else "🔴 High"
         st.metric("🚦 Congestion", congestion_status)
-    
+
     # ---------------- TABS ----------------
     tab1, tab2 = st.tabs(["🏥 Hospital Analysis", "🗺️ Route Comparison"])
-    
+
     with tab1:
         if "distances" in data and data["distances"]:
             hospital_df = pd.DataFrame([
-                {"🏆 Rank": i+1, "🏥 Hospital ID": h, "📏 Distance (km)": round(d/1000, 2), 
+                {"🏆 Rank": i+1, "🏥 Hospital ID": h, "📏 Distance (km)": round(d/1000, 2),
                  "📍 Status": "🎯 Selected" if h == data["destination"] else "⚪ Available"}
                 for i, (h, d) in enumerate(sorted(data["distances"].items(), key=lambda x: x[1]))
             ])
             st.dataframe(hospital_df, use_container_width=True, hide_index=True)
         else:
             st.info("Hospital analysis will be available after patient pickup.")
-    
+
     with tab2:
         route_data = []
         current_start = amb["routes_data"]["optimal_route"][0] if "old_route" in data else data["start"]
-        
+
         try:
             optimal_dist = nx.shortest_path_length(G, current_start, data["destination"], weight="dynamic_weight")
         except nx.NetworkXNoPath:
@@ -616,72 +646,72 @@ else:
                 G[amb["routes_data"]["optimal_route"][j]][amb["routes_data"]["optimal_route"][j+1]][0].get('dynamic_weight', 0)
                 for j in range(len(amb["routes_data"]["optimal_route"]) - 1)
             )
-        
+
         route_data.append({
-            "🛣️ Route": "🎯 Optimal", 
-            "📏 Distance (km)": round(optimal_dist/1000, 2), 
-            "🔗 Nodes": len(amb["routes_data"]["optimal_route"]), 
-            "💡 Weight Type": "LSTM-based",
+            "🛣️ Route": "🎯 Optimal",
+            "📏 Distance (km)": round(optimal_dist/1000, 2),
+            "🔗 Nodes": len(amb["routes_data"]["optimal_route"]),
+            "💡 Weight Type": "RF Congestion Model",
             "📊 Status": "🟢 Active"
         })
-        
+
         for i, route in enumerate(data["alternate_routes"]):
             try:
-                alt_dist = sum(G[route[j]][route[j+1]][0].get('dynamic_weight', get_min_edge_length(G, route[j], route[j+1])) 
-                              for j in range(len(route)-1))
+                alt_dist = sum(
+                    G[route[j]][route[j+1]][0].get('dynamic_weight', get_min_edge_length(G, route[j], route[j+1]))
+                    for j in range(len(route)-1)
+                )
                 route_data.append({
-                    "🛣️ Route": f"🔄 Alternate {i+1}", 
-                    "📏 Distance (km)": round(alt_dist/1000, 2), 
-                    "🔗 Nodes": len(route), 
-                    "💡 Weight Type": "LSTM-based",
+                    "🛣️ Route": f"🔄 Alternate {i+1}",
+                    "📏 Distance (km)": round(alt_dist/1000, 2),
+                    "🔗 Nodes": len(route),
+                    "💡 Weight Type": "RF Congestion Model",
                     "📊 Status": "🟡 Backup"
                 })
             except (KeyError, IndexError, TypeError):
                 continue
-        
+
         st.dataframe(pd.DataFrame(route_data), use_container_width=True, hide_index=True)
-    
+
     # ---------------- MOVEMENT CONTROL ----------------
     st.subheader("🚑 Ambulance Movement Control")
-    
-    # Accident simulation
+
     if st.button("⚠️ Simulate Accident", type="secondary", use_container_width=True):
         if amb["step"] > 0 and amb["step"] < len(amb["routes_data"]["optimal_route"]) - 1:
             current_node = amb["routes_data"]["optimal_route"][amb["step"]]
             old_route = data["optimal_route"].copy()
-            
+
             if len(old_route) > 1:
-                old_congestion = np.mean([G[old_route[i]][old_route[i+1]][0].get('congestion_factor', 1.0) 
+                old_congestion = np.mean([G[old_route[i]][old_route[i+1]][0].get('congestion_factor', 1.0)
                                           for i in range(len(old_route)-1)])
-                old_time = sum(G[old_route[i]][old_route[i+1]][0].get('dynamic_weight', 0) 
-                              for i in range(amb["step"], len(old_route)-1))
+                old_time = sum(G[old_route[i]][old_route[i+1]][0].get('dynamic_weight', 0)
+                               for i in range(amb["step"], len(old_route)-1))
             else:
                 old_congestion = 1.0
                 old_time = 0
-            
+
             for i in range(amb["step"], len(amb["routes_data"]["optimal_route"]) - 1):
                 u, v = amb["routes_data"]["optimal_route"][i], amb["routes_data"]["optimal_route"][i+1]
                 if G.has_edge(u, v):
                     edge_data = G[u][v][0]
-                    # ML: Spike congestion factor to 3x to simulate accident — forces Dijkstra to reroute
+                    # ML: Spike congestion to 3x to simulate accident — forces reroute
                     edge_data['dynamic_weight'] = edge_data.get('length', 100) * 3.0
                     edge_data['congestion_factor'] = 3.0
-            
+
             try:
-                # DP: Re-run Dijkstra after accident congestion spike to find new optimal route
                 new_route = nx.shortest_path(G, current_node, data["destination"], weight="dynamic_weight")
-                
+
                 if new_route[0] == current_node:
                     if len(new_route) > 1:
-                        new_congestion = np.mean([G[new_route[i]][new_route[i+1]][0].get('congestion_factor', 1.0) 
-                                                 for i in range(len(new_route)-1)])
-                        new_time = sum(G[new_route[i]][new_route[i+1]][0].get('dynamic_weight', 0) 
-                                      for i in range(len(new_route)-1))
+                        new_congestion = np.mean([G[new_route[i]][new_route[i+1]][0].get('congestion_factor', 1.0)
+                                                  for i in range(len(new_route)-1)])
+                        new_time = sum(G[new_route[i]][new_route[i+1]][0].get('dynamic_weight', 0)
+                                       for i in range(len(new_route)-1))
                     else:
                         new_congestion = 1.0
                         new_time = 0
                     time_saved = old_time - new_time
-                    
+
                     data["old_route"] = old_route
                     data["optimal_route"] = new_route
                     data["alternate_routes"] = build_alternate_routes(
@@ -694,7 +724,7 @@ else:
                     data["old_congestion"] = old_congestion
                     data["new_congestion"] = new_congestion
                     data["time_saved"] = time_saved
-                    
+
                     amb["step"] = 0
                     amb["auto_drive"] = False
                     sync_ambulance_state(amb)
@@ -711,7 +741,7 @@ else:
                     st.rerun()
             except nx.NetworkXNoPath:
                 st.error("No alternate path available")
-    
+
     can_generate_hospital_path = (
         amb.get("phase") == "ToPickup"
         and amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1
@@ -721,24 +751,23 @@ else:
         G = data["G"]
         hospital_nodes = data["hospital_nodes"]
         pickup_node = amb["pickup_node"]
-        
+
         distances = {}
         for h in hospital_nodes:
             try:
                 distances[h] = nx.shortest_path_length(G, pickup_node, h, weight="dynamic_weight")
             except nx.NetworkXNoPath:
                 continue
-        
+
         if distances:
             nearest_hospital = min(distances, key=distances.get)
             try:
                 route_to_hospital = nx.shortest_path(G, pickup_node, nearest_hospital, weight="dynamic_weight")
-                
-                # Compute alternate routes for pickup -> hospital phase and show them on map.
+
                 alternate_routes = build_alternate_routes(
                     G, route_to_hospital, pickup_node, nearest_hospital, max_alternates=3
                 )
-                
+
                 data["optimal_route"] = route_to_hospital
                 data["start"] = pickup_node
                 data["destination"] = nearest_hospital
@@ -763,28 +792,28 @@ else:
         if st.button("⏮️ Start", use_container_width=True, disabled=start_disabled):
             amb["auto_drive"] = True
             st.rerun()
-    
+
     with col2:
         if st.button("⬅️ Previous", disabled=amb["step"] == 0, use_container_width=True):
             amb["auto_drive"] = False
             amb["step"] -= 1
             sync_ambulance_state(amb)
             st.rerun()
-    
+
     with col3:
         if st.button("➡️ Next", disabled=amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1, use_container_width=True):
             amb["auto_drive"] = False
             amb["step"] += 1
             sync_ambulance_state(amb)
             st.rerun()
-    
+
     with col4:
         end_disabled = amb["step"] == len(amb["routes_data"]["optimal_route"]) - 1
         if st.button("⏭️ End", disabled=end_disabled, use_container_width=True):
             amb["step"] = len(amb["routes_data"]["optimal_route"]) - 1
             sync_ambulance_state(amb)
             st.rerun()
-    
+
     if "slider_override" not in amb:
         amb["slider_override"] = False
 
@@ -795,8 +824,6 @@ else:
     _route_len = len(amb["routes_data"]["optimal_route"])
     _slider_max = max(_route_len - 1, 1)
     _safe_step = max(0, min(amb["step"], _slider_max))
-    # When arrived, pin the key to the final step so Streamlit never re-initialises
-    # the widget back to 0 on the next rerun.
     _slider_key = (
         f"slider_{selected_ambulance}_arrived_{_safe_step}"
         if amb["status"] == "Arrived"
@@ -811,11 +838,11 @@ else:
     ):
         amb["step"] = slider_step
         sync_ambulance_state(amb)
-    
+
     # ---------------- REROUTE LOG ----------------
     if amb["reroute_count"] > 0 or amb["event_log"]:
         st.subheader("📜 Reroute Event Log")
-        
+
         col1, col2, col3 = st.columns(3)
         with col1:
             st.metric("🔄 Total Reroutes", amb["reroute_count"])
@@ -826,7 +853,7 @@ else:
         with col3:
             if "time_saved" in data:
                 st.metric("⏱️ Time Impact", f"{abs(data['time_saved']):.0f}s")
-        
+
         if amb["event_log"]:
             with st.expander("📝 View Event Details", expanded=True):
                 for idx, event in enumerate(reversed(amb["event_log"])):
@@ -844,8 +871,8 @@ else:
                         - ⏱️ Time: {abs(event.get('time_saved', 0)):.0f}s {'saved' if event.get('time_saved', 0) > 0 else 'added'}
                         ---
                         """)
-    
-    # ---------------- MAP (rendered once, animated via JS) ----------------
+
+    # ---------------- MAP ----------------
     route_coords = [
         [G.nodes[n]['y'], G.nodes[n]['x']]
         for n in amb["routes_data"]["optimal_route"]
@@ -854,7 +881,6 @@ else:
 
     m = folium.Map(location=data["center"], zoom_start=15, control_scale=True)
 
-    # Static layers — drawn once, never change during animation
     route_colors = ["blue", "green", "orange", "purple"]
     for idx, alt_route in enumerate(data["alternate_routes"]):
         if idx < len(route_colors):
@@ -897,7 +923,6 @@ else:
             popup="🏥 Destination" if is_dest else "🏥 Hospital"
         ).add_to(m)
 
-    # Ambulance marker at current step position
     folium.Marker(
         location=current_pos,
         popup=f"🚑 {selected_ambulance}",
@@ -907,8 +932,6 @@ else:
         )
     ).add_to(m)
 
-    # Inject JS: smoothly animate the marker through remaining waypoints client-side
-    # This runs entirely in the browser — zero Streamlit reruns during movement
     if amb["auto_drive"] and amb["status"] != "Arrived":
         remaining_coords = route_coords[amb["step"]:]
         interval_ms = int(MOVE_INTERVAL_SEC * 1000)
@@ -921,7 +944,6 @@ else:
             var interval = {interval_ms};
 
             function moveMarker() {{
-                // Find the leaflet map and the ambulance DivIcon marker
                 var maps = Object.values(window).filter(function(v) {{
                     return v && v._leaflet_id && v.eachLayer;
                 }});
@@ -941,7 +963,6 @@ else:
                 }});
             }}
 
-            // Wait for map to be ready
             var ready = setInterval(function() {{
                 var maps = Object.values(window).filter(function(v) {{
                     return v && v._leaflet_id && v.eachLayer;
@@ -979,7 +1000,6 @@ else:
 
 if any_auto_drive:
     time.sleep(MOVE_INTERVAL_SEC)
-    # Advance all auto-driving ambulances by one step
     for amb in st.session_state.fleet.values():
         if not (amb["routes_data"] and amb["auto_drive"]):
             continue
@@ -994,4 +1014,3 @@ if any_auto_drive:
             amb["auto_drive"] = False
         sync_ambulance_state(amb)
     st.rerun()
-
